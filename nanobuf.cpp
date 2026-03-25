@@ -5,13 +5,34 @@
 
 namespace nb{
 
+struct slice{
+	void* data = 0; size_t size = 0;
+	slice(void* a, size_t b) : data(a), size(b){}
+	slice(const std::string_view& a) : data((void*)a.data()), size(a.size()){}
+	explicit operator std::string() const{return std::string((char*)data,size);}
+	operator std::string_view() const{return std::string_view((char*)data,size);}
+	template<int N>
+	bool operator==(const char (&o)[N]) const{ return size==N-1 && !memcmp(data, o, N-1); }
+	bool operator==(const slice&) const = default;
+	explicit operator void*() const{return this->data;}
+	template<typename T>
+	explicit operator T*() const{ return (T*)this->data; }
+	void copy_to(void* a) const{
+		if(this->size)
+			std::memcpy(a, this->data, this->size);
+	}
+};
+
 class sstring{
 	char* _data;
-	public:
+public:
 	sstring() : _data(0){}
-	sstring(const char* a, size_t len) : _data((char*)std::malloc(len+sizeof(size_t))+sizeof(size_t)){
-		((size_t*)_data)[-1] = len;
-		std::memcpy(_data, a, len);
+	sstring(const char* a, size_t len) : _data(){
+		if(len){
+			_data = (char*)std::malloc(len+sizeof(size_t))+sizeof(size_t);
+			((size_t*)_data)[-1] = len;
+			std::memcpy(_data, a, len);
+		}else _data = 0;
 	}
 	sstring(const sstring& other){
 		if(!other._data){ _data = 0; return; }
@@ -20,9 +41,10 @@ class sstring{
 		std::memcpy(_data=d+sizeof(size_t), other._data, *(size_t*)d = len);
 	}
 	sstring(sstring&& other) : _data(other._data){ other._data = 0; }
-	sstring(const std::string& other) : sstring(other.data(), other.size()){}
-	operator std::string() const{return {_data,_data?((size_t*)_data)[-1]:0};}
-	operator char*() const{return _data;}
+	explicit sstring(const std::string& other) : sstring(other.data(), other.size()){}
+	explicit sstring(const slice& other) : sstring((char*)other.data, other.size){}
+	explicit operator std::string() const{return {_data,_data?((size_t*)_data)[-1]:0};}
+	explicit operator char*() const{return _data;}
 	operator bool() const{return _data!=0;}
 	bool operator!() const{return _data==0;}
 	char* data() const{return _data;}
@@ -38,25 +60,10 @@ class sstring{
 	}
 };
 
-struct slice{
-	void* data; size_t size;
-	operator std::string(){return std::string((char*)data,size);}
-	operator std::string_view(){return std::string_view((char*)data,size);}
-	operator void*(){return this->data;}
-	operator sstring(){return {(char*)this->data,this->size};}
-	template<typename T>
-	explicit operator T*(){ return (T*)this->data; }
-	char* copy(void* a){
-		if(this->size)
-			std::memcpy(a, this->data, this->size);
-		return (char*)a;
-	}
-};
-
 class BufWriter{
 	BufWriter(uint8_t* s, uint8_t* e, uint8_t* h) : start(s), end(e), head(h){}
 	uint8_t *start, *end, *head;
-	public:
+public:
 	~BufWriter(){ std::free(this->start); }
 	size_t size() const{return (size_t)(this->head-this->start);}
 	size_t capacity() const{return (size_t)(this->end-this->start);}
@@ -70,15 +77,15 @@ class BufWriter{
 		this->start = a.start; this->end = a.end; this->head = a.head;
 		a.start = a.head = a.end = nullptr;
 	}
-	BufWriter(BufWriter& a) = delete;
+	BufWriter(const BufWriter&) = delete;
 	BufWriter& operator=(BufWriter&& a){
 		this->~BufWriter();
 		this->start = a.start; this->end = a.end; this->head = a.head;
 		a.start = a.head = a.end = nullptr;
 		return *this;
 	}
-	BufWriter& operator=(BufWriter& a) = delete;
-	// Invalidate the current BufWriter so that it is not destructed. You must std::std::free this.data() yourself (the buffer must be retrieved before calling invalidate())
+	BufWriter& operator=(const BufWriter&) = delete;
+	// Invalidate the current BufWriter so that it is not destructed. You must std::free this.data() yourself (the buffer must be retrieved before calling invalidate())
 	void invalidate(){ this->start = this->head = this->end = nullptr; }
 	// Explicitly copy the buffer
 	BufWriter copy() const{
@@ -168,27 +175,35 @@ class BufWriter{
 		if(this->head==this->end) this->_expand();
 		*this->head++ = n;
 	}
-	inline void i8(int8_t n){u8(n);}
+	void i8(int8_t n){u8(n);}
 	void u16(uint16_t n){
 		if(this->head>=this->end-1) this->_expand();
 		*this->head = n>>8;
 		this->head[1] = n;
 		this->head += 2;
 	}
-	inline void i16(int16_t n){u16(n);}
+	void i16(int16_t n){u16(n);}
 	void u24(uint32_t n){
 		if(this->head>this->end-3) this->_expand();
 		*this->head = n>>16; this->head[1] = n>>8;
 		this->head[2] = n; this->head += 3;
 	}
-	inline void i24(int32_t n){u24(n);}
+	void i24(int32_t n){u24(n);}
 	void u32(uint32_t n){
 		if(this->head>this->end-4) this->_expand();
 		*this->head = n>>24; this->head[1] = n>>16;
 		this->head[2] = n>>8; this->head[3] = n;
 		this->head += 4;
 	}
-	inline void i32(int32_t n){u32(n);}
+	void i32(int32_t n){u32(n);}
+	void u48(uint64_t n){
+		if(this->head>this->end-6) this->_expand();
+		*this->head = n>>40; this->head[1] = n>>32;
+		this->head[2] = n>>24; this->head[3] = n>>16;
+		this->head[4] = n>>8; this->head[5] = n;
+		this->head += 6;
+	}
+	void i48(uint64_t n){u48(n);}
 	void u64(uint64_t n){
 		if(this->head>this->end-8) this->_expand();
 		*this->head = n>>56; this->head[1] = n>>48;
@@ -197,17 +212,9 @@ class BufWriter{
 		this->head[6] = n>>8; this->head[7] = n;
 		this->head += 8;
 	}
-	inline void i64(uint64_t n){u64(n);}
-	void u48(uint64_t n){
-		if(this->head>this->end-6) this->_expand();
-		*this->head = n>>40; this->head[1] = n>>32;
-		this->head[2] = n>>24; this->head[3] = n>>16;
-		this->head[4] = n>>8; this->head[5] = n;
-		this->head += 6;
-	}
-	inline void i48(uint64_t n){u48(n);}
-	inline void f32(float n){u32(std::bit_cast<uint32_t>(n));}
-	inline void f64(double n){u64(std::bit_cast<uint64_t>(n));}
+	void i64(uint64_t n){u64(n);}
+	void f32(float n){u32(std::bit_cast<uint32_t>(n));}
+	void f64(double n){u64(std::bit_cast<uint64_t>(n));}
 	void str(const void* s, size_t n){
 		if(this->head>this->end-n-4){
 			size_t sz = (size_t)(this->head-this->start), nsz = ((this->end-this->start)<<1)+n;
@@ -227,13 +234,13 @@ class BufWriter{
 		}
 		if(n){ std::memcpy(this->head, s, n); this->head += n; }
 	}
-	inline void str(const slice& s){ str(s.data,s.size); }
-	inline void str(const sstring& s){ str(s.data(),s.size()); }
-	inline void str(const std::string_view& s){ str(s.data(),s.size()); }
-	inline void str(const char* s){ str(s,strlen(s)); }
-	inline void u8arr(const slice& s){ u8arr(s.data,s.size); }
-	inline void u8arr(const sstring& s){ u8arr(s.data(),s.size()); }
-	inline void u8arr(const std::string_view& s){ u8arr(s.data(),s.size()); }
+	void str(const slice& s){ str(s.data,s.size); }
+	void str(const sstring& s){ str(s.data(),s.size()); }
+	void str(const std::string_view& s){ str(s.data(),s.size()); }
+	void str(const char* s){ str(s,strlen(s)); }
+	void u8arr(const slice& s){ u8arr(s.data,s.size); }
+	void u8arr(const sstring& s){ u8arr(s.data(),s.size()); }
+	void u8arr(const std::string_view& s){ u8arr(s.data(),s.size()); }
 	operator std::string() const{
 		return std::string((char*)this->start, (size_t)(this->head-this->start));
 	}
@@ -247,7 +254,7 @@ class BufWriter{
 // Buffer reader that gracefully handles out-of-bounds by returning 0
 class BufReader{
 	uint8_t* head; uint8_t* end;
-	public:
+public:
 	BufReader(const void* dat, size_t size){
 		this->head = (uint8_t*) dat; this->end = this->head+size;
 	}
@@ -257,10 +264,10 @@ class BufReader{
 	BufReader(const slice& s){
 		this->head = (uint8_t*) s.data; this->end = this->head+s.size;
 	}
-	static BufReader c_str(char* dat){
+	static BufReader c_str(const char* dat){
 		return BufReader(dat, strlen(dat));
 	}
-	BufReader(std::string& dat){
+	BufReader(const std::string& dat){
 		this->head = (uint8_t*) dat.data();
 		this->end = this->head + dat.size();
 	}
@@ -333,25 +340,25 @@ class BufReader{
 		if(n<128) return n;
 		else return ++this->head>this->end?0:(n&0x7F)<<8|(uint16_t)this->head[-1];
 	}
-	inline uint8_t peek(size_t n = 0){ return this->head>=this->end-n ? 0 : this->head[n]; }
+	uint8_t peek(size_t n = 0){ return this->head>=this->end-n ? 0 : this->head[n]; }
 	uint8_t u8(){ return ++this->head>this->end ? 0 : this->head[-1]; }
-	inline int8_t i8(){ return u8(); }
+	int8_t i8(){ return u8(); }
 	uint16_t u16(){ return (this->head+=2)>this->end ? 0 : this->head[-2]<<8|this->head[-1]; }
-	inline int16_t i16(){return u16();}
+	int16_t i16(){return u16();}
 	uint32_t u24(){ return (this->head+=3)>this->end ? 0 : this->head[-3]<<16|this->head[-2]<<8|this->head[-1]; }
-	inline int32_t i24(){return u24();}
+	int32_t i24(){return u24();}
 	uint32_t u32(){ return (this->head+=4)>this->end ? 0 : this->head[-4]<<24|this->head[-3]<<16|this->head[-2]<<8|this->head[-1]; }
-	inline int32_t i32(){ return u32(); }
+	int32_t i32(){ return u32(); }
 	uint64_t u48(){
 		return (this->head+=6)>this->end ? 0 : uint64_t(this->head[-6]<<24|this->head[-5]<<16|this->head[-4]<<8|this->head[-3])<<16|(this->head[-2]<<8|this->head[-1]);
 	}
-	inline int64_t i48(){ return u48(); }
+	int64_t i48(){ return u48(); }
 	uint64_t u64(){
 		return (this->head+=8)>this->end ? 0 : uint64_t(this->head[-8]<<24|this->head[-7]<<16|this->head[-6]<<8|this->head[-5])<<32|(this->head[-4]<<24|this->head[-3]<<16|this->head[-2]<<8|this->head[-1]);
 	}
-	inline int64_t i64(){ return u64(); }
-	inline float f32(){ return std::bit_cast<float>(u32()); }
-	inline double f64(){ return std::bit_cast<double>(u64()); }
+	int64_t i64(){ return u64(); }
+	float f32(){ return std::bit_cast<float>(u32()); }
+	double f64(){ return std::bit_cast<double>(u64()); }
 	slice str(){
 		if(this->head>=this->end) return {++this->head,0};
 		uint8_t n = *this->head++;
@@ -373,19 +380,26 @@ class BufReader{
 		return std::string((char*)this->head, (size_t)(this->end-this->head));
 	}
 	bool overran() const{return this->head>this->end;}
-	char* data(){ return (char*) head; }
+	char* data() const{ return (char*) head; }
 };
 
-
-void hexdump(const void* __s, size_t n){
-	const uint8_t *s = (const uint8_t*) __s, *e = s+n;
-	char v[4] = {0,0,32,0};
-	while(1){
-		uint8_t x = *s++;
-		v[0] = "0123456789abcdef"[x>>4]; v[1] = "0123456789abcdef"[x&15];
-		if(s==e){v[2]=10;fputs(v, stdout);break;}
-		fputs(v, stdout);
+inline void hexdump(const void *data, size_t len){
+	printf("\x1b[32m=== %p (%zu bytes) ===\x1b[m\n", data, len);
+	if(!len) return;
+	const uint8_t *p = (const uint8_t *)data;
+	char* str = (char*) std::malloc(len*3 + ((len+3)>>2));
+	char* str2 = str;
+	const char dig[16] = {'0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f'};
+	for(int i = 0; i < len; i++){
+		uint8_t byte = p[i];
+		str2[0] = dig[byte>>4]; str2[1] = dig[byte&15]; str2[2] = ' ';
+		str2 += 3;
+		if((i&3)==3)
+			*str2++ = (i&15)==15 ? '\n' : ' ';
 	}
+	str2[-1] = '\n';
+	fwrite(str, 1, str2-str, stdout);
+	free(str);
 }
 inline void hexdump(const std::string_view& s){ hexdump(s.data(), s.size()); }
 inline void hexdump(const slice& s){ hexdump(s.data, s.size); }
